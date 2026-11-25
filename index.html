@@ -1,0 +1,298 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="description" content="How I built Nexy, a RAG chatbot that refreshes its own knowledge base, and the production bugs I debugged along the way.">
+<title>Nexy Case Study</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: one reading column of engineering notes, with wide bands for the architecture and the debugging log */
+:root {
+  --bg: #f6f6f9;
+  --surface: #ffffff;
+  --fg: #17151f;
+  --muted: #5b5868;
+  --line: #e1dfe8;
+  --accent: #5d2a86;
+  --accent-soft: #efe8f6;
+  --ok: #1f7a4d;
+  --warn: #9a5b00;
+  --code-bg: #f0eef5;
+  --font-display: "Space Grotesk", "Segoe UI", system-ui, sans-serif;
+  --font-body: "Inter", "Segoe UI", system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #121118; --surface: #1b1a23; --fg: #ecebf2; --muted: #a29fb2; --line: #2e2c3a;
+    --accent: #c9a6f5; --accent-soft: #2a2238; --ok: #6fd39d; --warn: #f0b45a; --code-bg: #22202c;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #121118; --surface: #1b1a23; --fg: #ecebf2; --muted: #a29fb2; --line: #2e2c3a;
+  --accent: #c9a6f5; --accent-soft: #2a2238; --ok: #6fd39d; --warn: #f0b45a; --code-bg: #22202c;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font: 16px/1.65 var(--font-body);
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+}
+.wrap { max-width: 860px; margin: 0 auto; padding-block: 56px 72px; display: grid; gap: 64px; }
+h1, h2, h3 { font-family: var(--font-display); text-wrap: balance; margin: 0; line-height: 1.15; }
+h1 { font-size: clamp(2.2rem, 5vw, 3.2rem); font-weight: 700; letter-spacing: -0.02em; }
+h2 { font-size: 1.6rem; font-weight: 600; letter-spacing: -0.01em; }
+h3 { font-size: 1.12rem; font-weight: 600; }
+p { margin: 0; max-width: 68ch; }
+a { color: var(--accent); text-underline-offset: 3px; }
+a:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; border-radius: 2px; }
+code, .mono { font-family: var(--font-mono); font-size: 0.88em; }
+code { background: var(--code-bg); padding: 0.1em 0.35em; border-radius: 4px; overflow-wrap: anywhere; }
+.label { font-family: var(--font-mono); font-size: 0.75rem; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+section { display: grid; gap: 20px; min-width: 0; }
+
+/* Header */
+header { display: grid; gap: 18px; }
+.lede { font-size: 1.15rem; color: var(--muted); max-width: 62ch; }
+.byline { display: flex; flex-wrap: wrap; gap: 6px 18px; color: var(--muted); font-size: 0.95rem; }
+.byline strong { color: var(--fg); font-weight: 600; }
+.links { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 6px; }
+.btn {
+  display: inline-flex; align-items: center; gap: 8px; padding: 10px 16px; border-radius: 8px;
+  font-weight: 600; font-size: 0.95rem; text-decoration: none; border: 1px solid var(--line);
+  background: var(--surface); color: var(--fg);
+}
+.btn.primary { background: var(--accent); border-color: var(--accent); color: var(--bg); }
+
+/* Facts */
+.facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 1px; background: var(--line); border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+.fact { background: var(--surface); padding: 16px 18px; display: grid; gap: 4px; min-width: 0; }
+.fact b { font-family: var(--font-display); font-size: 1.5rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+.fact span { color: var(--muted); font-size: 0.88rem; }
+
+/* Stack */
+.stack { display: flex; flex-wrap: wrap; gap: 8px; }
+.stack span { font-family: var(--font-mono); font-size: 0.82rem; padding: 4px 10px; border-radius: 999px; background: var(--accent-soft); color: var(--fg); }
+
+/* Diagram */
+.diagram { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 16px; overflow-x: auto; }
+.diagram pre { margin: 0; }
+
+/* Lists */
+.built { display: grid; gap: 14px; margin: 0; padding: 0; list-style: none; }
+.built li { display: grid; grid-template-columns: 1fr; gap: 2px; padding-left: 16px; border-left: 2px solid var(--accent-soft); }
+.built li b { font-weight: 600; }
+.built li span { color: var(--muted); }
+
+/* Debugging log */
+.log { display: grid; gap: 14px; }
+.case { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 20px 22px; display: grid; gap: 12px; min-width: 0; }
+.case header { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 6px 14px; }
+.case dl { display: grid; grid-template-columns: 7.5rem 1fr; gap: 6px 16px; margin: 0; }
+.case dt { font-family: var(--font-mono); font-size: 0.78rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); padding-top: 3px; }
+.case dd { margin: 0; min-width: 0; }
+.tag { font-family: var(--font-mono); font-size: 0.75rem; padding: 2px 8px; border-radius: 4px; background: var(--accent-soft); color: var(--accent); white-space: nowrap; }
+.evidence { font-family: var(--font-mono); font-size: 0.82rem; background: var(--code-bg); border-radius: 6px; padding: 10px 12px; overflow-x: auto; white-space: pre; margin: 0; }
+
+/* Table */
+.table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
+table { border-collapse: collapse; width: 100%; font-size: 0.93rem; }
+th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font-family: var(--font-mono); font-size: 0.75rem; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); font-weight: 500; }
+tr:last-child td { border-bottom: 0; }
+td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.ok { color: var(--ok); font-weight: 600; }
+.warn { color: var(--warn); font-weight: 600; }
+
+footer { color: var(--muted); font-size: 0.9rem; border-top: 1px solid var(--line); padding-top: 20px; display: grid; gap: 6px; }
+
+@media (max-width: 560px) {
+  .wrap { padding-block: 36px 56px; gap: 48px; }
+  .case dl { grid-template-columns: 1fr; gap: 2px; }
+  .case dd { margin-bottom: 8px; }
+}
+@media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <span class="label">Case study · AI engineering</span>
+    <h1>Nexy, a RAG assistant that keeps itself up to date</h1>
+    <p class="lede">The chatbot on NextAct Solutions' website answers visitors from the company's own pages, cites its sources and captures leads. I built it, then built the pipeline that refreshes its knowledge after every deployment, and spent most of my time on the bugs that only show up in production.</p>
+    <div class="byline">
+      <span><strong>Ali El Ouankrimi</strong></span>
+      <span>Built at NextAct Solutions</span>
+      <span>Oct – Nov 2026</span>
+    </div>
+    <div class="links">
+      <a class="btn primary" href="https://nextact-solutions.com/expertises/ia-automatisation" target="_blank" rel="noopener">Try Nexy on the live site</a>
+      <a class="btn" href="#debugging">Read the debugging log</a>
+    </div>
+  </header>
+
+  <section aria-labelledby="facts-title">
+    <h2 id="facts-title" class="label">At a glance</h2>
+    <div class="facts">
+      <div class="fact"><b>13</b><span>site pages indexed, 204 chunks</span></div>
+      <div class="fact"><b>~1 credit</b><span>per page scraped, only changed pages re-embedded</span></div>
+      <div class="fact"><b>26 / 26</b><span>offline sync scenarios passing</span></div>
+      <div class="fact"><b>0</b><span>deployments blocked by a failed sync, by design</span></div>
+    </div>
+    <div class="stack" aria-label="Technology stack">
+      <span>Python · FastAPI</span><span>LangChain create_agent</span><span>Gemini</span><span>ChromaDB</span><span>Firecrawl</span><span>React · TypeScript</span><span>Docker Compose</span><span>GitHub Actions</span><span>nginx</span>
+    </div>
+  </section>
+
+  <section aria-labelledby="arch-title">
+    <h2 id="arch-title">How it works</h2>
+    <p>Two paths share one vector store. A visitor's question goes through an agent that decides whether to search the knowledge base or save a lead. A push to <code>main</code> deploys the site, then refreshes that knowledge base from the live pages.</p>
+    <div class="diagram">
+<pre class="mermaid">
+flowchart LR
+  V[Visitor] --> W[React chat widget]
+  W -->|/chatbot via nginx| API[FastAPI]
+  API --> A[LangChain agent<br/>Gemini + middleware]
+  A -->|search tool| C[(ChromaDB)]
+  A -->|lead tool| L[(SQLite + back-office API)]
+  P[Push to main] --> CI[CI tests]
+  CI --> D[Deploy over SSH]
+  D --> S[deploy-vps.sh]
+  S -->|front content changed| K[sync_knowledge.py]
+  K -->|sitemap + Firecrawl| R[Clean, hash, compare]
+  R -->|changed pages only| C
+  R -->|restart chatbot| API
+</pre>
+    </div>
+  </section>
+
+  <section aria-labelledby="built-title">
+    <h2 id="built-title">What I built</h2>
+    <ul class="built">
+      <li><b>An agent, not a fixed pipeline.</b><span>LangChain <code>create_agent</code> with two tools: knowledge search and lead capture. Middleware handles retries on Gemini 503s only, a cap on model calls per turn, and tool errors.</span></li>
+      <li><b>Incremental knowledge sync.</b><span>Reads the page list from the sitemap, scrapes each page fresh, hashes the cleaned text and re-embeds only pages whose hash changed. Pages gone from the sitemap are removed.</span></li>
+      <li><b>CI/CD integration that never blocks a release.</b><span>The deploy script runs the sync only when front-end content changed, and maps the sync's exit codes (0 to 4) to a restart, a GitHub warning, or nothing.</span></li>
+      <li><b>Safeguards for unattended runs.</b><span>Rejects error pages, near-empty renders and pages that lost half their content. Aborts without writing if over 30% of pages fail or over 30% would be deleted.</span></li>
+      <li><b>Manual and scheduled runs.</b><span><code>sync-nexy</code> and <code>sync-nexy-force</code> from the GitHub Actions tab, plus a weekly run for content edited in the admin.</span></li>
+    </ul>
+  </section>
+
+  <section id="debugging" aria-labelledby="debug-title">
+    <h2 id="debug-title">Debugging log</h2>
+    <p>The problems that taught me the most. Each one passed every unit test and only appeared with real data or a real browser.</p>
+
+    <div class="log">
+
+      <article class="case">
+        <header><h3>Nexy quoted figures that were never on the site</h3><span class="tag">front-end × scraper</span></header>
+        <dl>
+          <dt>Symptom</dt><dd>The index held lines like <code>+-373 Projets livrés</code> and <code>-900,3% Disponibilité visée</code>. Three pages were also re-embedded on every sync although nothing had changed.</dd>
+          <dt>Cause</dt><dd>Animated counters computed their progress from the animation-frame timestamp. In the scraper's headless browser that clock lagged behind <code>performance.now()</code>, so progress went negative and the counter froze on a wrong value that changed between runs.</dd>
+          <dt>Fix</dt><dd>One shared <code>useCountUp</code> hook: it starts from the real value, measures time with a single clock and always ends on the real value through a timer.</dd>
+          <dt>Proof</dt><dd>In a browser with frames blocked, the pages show <code>+30</code>, <code>99,9%</code> and <code>&lt; 1 h</code>, with no negative values.</dd>
+        </dl>
+      </article>
+
+      <article class="case">
+        <header><h3>Edited pages looked unchanged</h3><span class="tag">caching</span></header>
+        <dl>
+          <dt>Symptom</dt><dd>Two syncs in a row reported every page as unchanged, which looked like success.</dd>
+          <dt>Cause</dt><dd>Firecrawl returns a cached copy up to two days old by default (<code>maxAge</code>). A page edited by a deployment could be read from that cache and keep its old version in Nexy, with no warning.</dd>
+          <dt>Fix</dt><dd><code>max_age=0</code> on every scrape, then a check that fresh scrapes of the same page hash identically, so the sync doesn't re-embed for nothing.</dd>
+        </dl>
+      </article>
+
+      <article class="case">
+        <header><h3>A visitor saw "Model call limits exceeded"</h3><span class="tag">agent behaviour</span></header>
+        <dl>
+          <dt>Symptom</dt><dd>On a question about training courses, the reply was the middleware's internal message: <code>Model call limits exceeded: run limit (5/5)</code>.</dd>
+          <dt>Cause</dt><dd>The limit middleware ends the run with its own message. Removing the tools on the last call didn't help: with function calls in the history, Gemini still asked for a tool, whether given <code>tools=[]</code> or <code>tool_choice="none"</code>.</dd>
+          <dt>Fix</dt><dd>On the last allowed call, the turn is rewritten as a plain question that carries the documents already retrieved. Gemini then answers from them.</dd>
+          <dt>Proof</dt><dd>With the limit lowered to 2, the real model returns a proper answer instead of the fallback message.</dd>
+        </dl>
+      </article>
+
+      <article class="case">
+        <header><h3>The chatbot kept answering from old data after a sync</h3><span class="tag">vector store</span></header>
+        <dl>
+          <dt>Cause</dt><dd>Chroma keeps its search index in memory. A second process can write new chunks: the record count updates, but searches in the running API still return old results, including deleted chunks. I reproduced it with 5 and 3,000 chunks, and a fresh client in the same process was still stale.</dd>
+          <dt>Fix</dt><dd>The deploy script restarts the chatbot only when the sync reports changes, which costs a few seconds of chatbot downtime and none for the site.</dd>
+        </dl>
+      </article>
+
+      <article class="case">
+        <header><h3>A regex that could hang the sync</h3><span class="tag">text cleaning</span></header>
+        <dl>
+          <dt>Cause</dt><dd>A pattern meant to strip a calendar's digits backtracked exponentially when a letter followed a long digit run. The marketing page contains a 58-digit run, protected only by a line break.</dd>
+          <dt>Evidence</dt><dd><pre class="evidence">32 digits + letter    0.5 s
+40 digits + letter   24.8 s
+58 digits + letter   > 30 s (stopped)</pre></dd>
+          <dt>Fix</dt><dd><code>\b\d{16,}\b</code>, which matches the same runs in linear time. The same pass fixed broken links, escaped characters and false headings.</dd>
+        </dl>
+      </article>
+
+      <article class="case">
+        <header><h3>Streaming, measured before shipping</h3><span class="tag">latency</span></header>
+        <dl>
+          <dt>Experiment</dt><dd>I added Server-Sent Events end to end, with status events ("searching…"), tokens and a final cleaned message.</dd>
+          <dt>Result</dt><dd>The first word arrived at 6.9 s and the full answer at 7.7 s. Streaming saved under 2 seconds, because the time goes into searching and model reasoning before the first word.</dd>
+          <dt>Decision</dt><dd>Kept on its own branch. Reducing search loops and reasoning time is the change that would actually help.</dd>
+        </dl>
+      </article>
+
+    </div>
+  </section>
+
+  <section aria-labelledby="sync-title">
+    <h2 id="sync-title">What a sync reports</h2>
+    <p>The deploy script reads the sync's exit code. A sync problem never fails the deployment: it surfaces as a warning in the GitHub Actions run.</p>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Code</th><th>Meaning</th><th>Deploy script reaction</th></tr></thead>
+        <tbody>
+          <tr><td class="num mono">0</td><td>Already up to date</td><td>Nothing</td></tr>
+          <tr><td class="num mono">1</td><td>Aborted, nothing written</td><td class="warn">Warning</td></tr>
+          <tr><td class="num mono">2</td><td>Nothing changed, some pages failed</td><td class="warn">Warning</td></tr>
+          <tr><td class="num mono">3</td><td>Knowledge base updated</td><td class="ok">Restart the chatbot</td></tr>
+          <tr><td class="num mono">4</td><td>Updated, some pages failed</td><td class="ok">Restart</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section aria-labelledby="limits-title">
+    <h2 id="limits-title">Known limits and next steps</h2>
+    <ul class="built">
+      <li><b>Admin edits wait for the weekly run.</b><span>A webhook from the PHP back-office, targeting only the pages that show the edited content, would make updates near-immediate.</span></li>
+      <li><b>Model quota.</b><span>A free-tier key allows about 20 model calls a day, and one question often takes two or more. Production needs a paid key and per-visitor rate limiting.</span></li>
+      <li><b>Latency.</b><span>Most of the 7 to 10 seconds is search loops and model reasoning. That is where the next gains are.</span></li>
+      <li><b>Single process.</b><span>The in-memory index ties the API to one worker. Moving to a Chroma server would remove the restart and allow scaling.</span></li>
+    </ul>
+  </section>
+
+  <footer>
+    <span>Built at NextAct Solutions. The source code is NextAct's; excerpts are available on request.</span>
+    <span>I'm happy to walk through the code and the decisions in an interview.</span>
+  </footer>
+
+</div>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11.4.1/dist/mermaid.min.js"></script>
+<script>
+  // Draw the architecture diagram explicitly: the page has finished loading here
+  mermaid.initialize({
+    startOnLoad: false,
+    theme: window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'neutral',
+  });
+  mermaid.run({ querySelector: '.mermaid' });
+</script>
+</body>
+</html>
